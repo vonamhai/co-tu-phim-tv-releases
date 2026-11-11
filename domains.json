@@ -1,0 +1,7 @@
+{
+  "rophim": {
+    "api": "https://api.rophim1.my/api/v1",
+    "web": "https://rophim1.sbs",
+    "embed": "https://api.rophim1.my/embed"
+  }
+}
