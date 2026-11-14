@@ -1,0 +1,140 @@
+# domains.json: ten mien RoPhim cho app. Ban <= 1.0.26 chi doc file nay; ban
+# moi doc thang trang thong bao raphim.net, file la du phong khi khong vao duoc
+# trang do. Workflow nay moi gio doc raphim.net giong app, ten mien moi vao
+# duoc thi ghi vao rophim.web; api, embed giu nguyen.
+#
+# Repo cong khai khong co hoat dong 60 ngay -> GitHub tu tat lich chay: bat lai
+# o tab Actions (Enable workflow) hoac `gh workflow enable rophim-domain.yml`.
+name: Ten mien RoPhim
+
+on:
+  schedule:
+    - cron: '23 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: rophim-domain
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Doc raphim.net, cap nhat domains.json
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import base64
+          import json
+          import os
+          import re
+          import urllib.error
+          import urllib.request
+          from urllib.parse import urlsplit
+
+          ANNOUNCEMENT = 'https://raphim.net/'
+          # Trang RoPhim nam sau Cloudflare: goi nhu trinh duyet (giong app).
+          BROWSER = {'User-Agent': 'Mozilla/5.0 (Linux; Android 14)'}
+
+          # Giong RophimEndpoints.parseAnnouncement trong app: o dia chi (<input value>),
+          # khong co thi lien ket (<a href>) dau tien toi rophim*.{duoi}.
+          TAG = re.compile(r'''<(input|a)\b(?:[^>"']|"[^"]*"|'[^']*')*>''', re.I)
+          HOST = re.compile(r'(?:www\.)?rophim[a-z0-9-]*\.[a-z][a-z0-9-]*')
+
+
+          def attr(name, tag):
+              m = re.search(
+                  r'\s' + name + r'''\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))''',
+                  tag,
+                  re.I,
+              )
+              return next((g for g in m.groups() if g is not None), '') if m else ''
+
+
+          def origin(raw):
+              s = raw.strip()
+              if '://' not in s:
+                  s = 'https://' + s
+              try:
+                  u = urlsplit(s)
+                  port = u.port
+              except ValueError:
+                  return None
+              if u.scheme.lower() != 'https' or '@' in u.netloc or port not in (None, 443):
+                  return None
+              host = (u.hostname or '').lower()
+              return 'https://' + host if HOST.fullmatch(host) else None
+
+
+          def announced(html):
+              tags = [(m.group(1).lower(), m.group(0)) for m in TAG.finditer(html)]
+              raws = [attr('value', t) for k, t in tags if k == 'input']
+              raws += [attr('href', t) for k, t in tags if k == 'a']
+              return next((web for web in map(origin, raws) if web), None)
+
+
+          def fetch(url, headers, method='GET', body=None):
+              data = None if body is None else json.dumps(body).encode()
+              req = urllib.request.Request(url, data, headers, method=method)
+              with urllib.request.urlopen(req, timeout=20) as res:
+                  return res.read()
+
+
+          def reachable(web):
+              """Giong app: 4xx van tinh (Cloudflare co the chan HEAD); 5xx, loi mang,
+              chung chi sai -> khong."""
+              try:
+                  fetch(web + '/', BROWSER, 'HEAD')
+                  return True
+              except urllib.error.HTTPError as e:
+                  return e.code < 500
+              except Exception:
+                  return False
+
+
+          def main():
+              try:
+                  html = fetch(ANNOUNCEMENT, BROWSER).decode('utf-8', 'replace')
+              except Exception as e:
+                  print(f'::warning::Khong doc duoc {ANNOUNCEMENT}: {e}')
+                  return
+              web = announced(html)
+              if not web:
+                  print(f'::warning::{ANNOUNCEMENT} khong co ten mien RoPhim')
+                  return
+
+              url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/contents/domains.json"
+              github = {
+                  'Authorization': f"Bearer {os.environ['GH_TOKEN']}",
+                  'Accept': 'application/vnd.github+json',
+                  'X-GitHub-Api-Version': '2022-11-28',
+              }
+              file = json.loads(fetch(url + '?ref=main', github))
+              config = json.loads(base64.b64decode(file['content']))
+              rophim = config.setdefault('rophim', {})
+              old = str(rophim.get('web') or '').strip().rstrip('/')
+              if web == old:
+                  print(f'Khong doi: {web}')
+                  return
+              if not reachable(web):
+                  print(f'::warning::Chua vao duoc {web}, giu {old}')
+                  return
+
+              rophim['web'] = web
+              text = json.dumps(config, indent=2, ensure_ascii=False) + '\n'
+              fetch(url, github, 'PUT', {
+                  'message': f'Doi ten mien web RoPhim sang {web} (theo raphim.net, truoc la {old})',
+                  'content': base64.b64encode(text.encode()).decode(),
+                  # Ai sua file giua chung -> 409, lan chay sau doc lai.
+                  'sha': file['sha'],
+                  'branch': 'main',
+              })
+              print(f'Da cap nhat: {old} -> {web}')
+
+
+          if __name__ == '__main__':
+              main()
